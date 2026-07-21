@@ -1,2 +1,4 @@
 pymongo==4.17.0
 ipykernel==7.3.0
+streamlit==1.59.2
+pandas==3.0.3

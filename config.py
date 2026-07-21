@@ -4,7 +4,10 @@ MONGO_URI = "mongodb://localhost:27017/"
 DB_NAME = "diabetes"
 COLL_NAME = "patients"
 
-# Nguong phan nhom, nguon xem kien_truc.txt muc 10:
+# job2.py ghi, app.py doc
+MODEL_PATH = "model.json"
+
+# nguon tung nguong: kien_truc.txt muc 10
 #   Tuoi     - ADA/CDC Diabetes Risk Test
 #   HbA1c    - ADA Standards of Care in Diabetes
 #   Glucose  - ADA Standards of Care in Diabetes (fasting plasma glucose)
