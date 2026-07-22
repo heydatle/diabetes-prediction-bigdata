@@ -4,3 +4,5 @@ __pycache__/
 bao_cao/
 docs/
 CLAUDE.md
+.vscode/
+model.json
