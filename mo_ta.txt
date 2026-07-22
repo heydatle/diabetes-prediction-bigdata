@@ -1,0 +1,215 @@
+MÔ TẢ CÁC FILE CODE
+Đồ án: Hệ thống dự đoán nguy cơ tiểu đường
+
+File này giải thích nhanh từng file để code không cần chú thích dài dòng. Lý do và
+nguồn cho các quyết định nằm ở kien_truc.txt.
+
+
+CÀI ĐẶT MÔI TRƯỜNG
+-----------------------------------------------------------------------------
+Yêu cầu: Python 3.11+, MongoDB chạy ở localhost:27017.
+
+  python -m venv .venv
+  .venv\Scripts\activate
+  pip install -r requirements.txt
+
+requirements.txt chỉ liệt kê thư viện dùng trực tiếp (pymongo, ipykernel,
+streamlit, pandas); phần còn lại cài kèm tự động. pandas chỉ dùng ở app.py để
+trình bày bảng và biểu đồ, không dùng trong job1.py, job2.py (kien_truc.txt,
+phần Engine viết tay).
+
+Thứ tự chạy: load_mongo.py -> job1.py -> job2.py -> streamlit run app.py. job3.py
+chạy độc lập lúc nào cũng được, chỉ cần MongoDB đã nạp dữ liệu. eda.ipynb mở trong
+VS Code, chọn kernel .venv, Restart & Run All.
+
+
+THƯ MỤC bao_cao/
+-----------------------------------------------------------------------------
+Chứa deliverable nộp cho GV và script sinh ra chúng:
+  ve_hinh.py       vẽ 5 hình của Chương 3 ra bao_cao/hinh/ (matplotlib).
+  tao_bao_cao.py   dựng file .docx theo bố cục GV yêu cầu, đến hết Chương 3.
+  tao_slide.py     dựng file .pptx cho buổi báo cáo tiến độ.
+
+Thứ tự chạy: ve_hinh.py -> tao_bao_cao.py -> tao_slide.py.
+
+Cần thêm matplotlib, python-docx, python-pptx. Ba thư viện này không có trong
+requirements.txt vì chỉ là công cụ dựng tài liệu lúc viết báo cáo, không phải thư
+viện hệ thống chạy. Ai chỉ chạy hệ thống thì không cần cài.
+
+Viết báo cáo bằng script để sửa lại nhanh và đồng loạt khi GV góp ý, thay vì chỉnh
+tay trong Word rồi lệch giữa các bản. Mục lục dùng trường TOC của Word: mở file
+trong Word bấm Ctrl+A rồi F9 là tự điền lại số trang.
+
+
+eda.ipynb
+-----------------------------------------------------------------------------
+Khảo sát dữ liệu thô, chốt cách tiền xử lý trước khi xây hệ thống chính thức. Đếm
+bằng vòng lặp thường, không theo MapReduce vì đây là bước tìm hiểu dữ liệu, không
+phải chức năng của đồ án.
+
+Bố cục: mục 1 in tổng quan (số giá trị phân biệt, min/max/mean/median/sd) để lộ
+bất thường; mục 3 điều tra từng bất thường và chốt xử lý; mục 4 tính tỷ lệ mắc
+theo chỉ số và kiểm tra cấu trúc nhãn; mục 5 tổng hợp. Mỗi số ở mục 3 có dấu vết
+dẫn tới nó ở mục 1 (age min = 0.08 dẫn tới điều tra 911 dòng age<1) thay vì xuất
+hiện không rõ nguồn gốc.
+
+Tỷ lệ mắc ở đây và ở job1.py gần giống nhưng không trùng hệt: notebook tính trên
+100.000 dòng thô, job1.py tính trên 96.146 dòng đã khử trùng lặp trong MongoDB.
+
+Dùng csv chuẩn, không pandas, đồng nhất với engine viết tay ở job1.py.
+
+Hàm dùng chung (ô đầu):
+  doc_du_lieu(path)   đọc CSV thành danh sách dict.
+  ti_le_mac(records)  tỷ lệ mắc trong một nhóm record.
+  in_bang(...)        in bảng tỷ lệ mắc theo nhóm.
+
+Restart & Run All trước khi lưu, để output khớp code.
+
+Quyết định tiền xử lý và số liệu đầy đủ: kien_truc.txt phần Dữ liệu.
+
+
+config.py
+-----------------------------------------------------------------------------
+Khai báo tập trung: đường dẫn CSV, kết nối MongoDB, ngưỡng phân nhóm, đường dẫn
+model. load_mongo.py, job1.py, job2.py cùng import từ đây.
+
+model.json: job2.py ghi sau khi train, app.py đọc lại để dự đoán. Hai bên chỉ giao
+tiếp qua file này.
+
+
+load_mongo.py
+-----------------------------------------------------------------------------
+Nạp dữ liệu vào MongoDB một lần: đọc CSV, khử trùng lặp, chuyển kiểu số, ghi vào
+diabetes.patients.
+
+Chạy lại được nhiều lần, không nhân đôi dữ liệu vì luôn xóa collection cũ trước khi
+nạp. Kết quả: 100.000 dòng còn 96.146 sau khử trùng lặp, 8.482 ca mắc (8,82%).
+
+Chỗ duy nhất đọc CSV. Từ sau bước này mọi xử lý đọc từ MongoDB.
+
+
+job1.py  (Job 1 - Thống kê theo mô hình MapReduce)
+-----------------------------------------------------------------------------
+Tính bảng tỷ lệ mắc theo từng nhóm chỉ số, theo đúng luồng MapReduce của Concept 1.
+Nguồn: MongoDB diabetes.patients (bản đã khử trùng lặp). Vai trò trong Concept 1
+và quyết định partition/combine: kien_truc.txt phần Job 1.
+
+Các pha, mỗi pha một hàm, ánh xạ 1:1 vào các ô trên sơ đồ Concept 1:
+  nhom(gia_tri, nguong, nhan)  nhóm của một giá trị số, dùng chung cho
+                               tuổi/HbA1c/glucose/BMI.
+  doc_input()      InputFormat: đọc toàn bộ document từ MongoDB.
+  chia_splits()    cắt dữ liệu thành SO_SPLIT phần (split1..split4 trên sơ đồ).
+  map_fn(doc)      mỗi record -> các cặp ((chỉ số, nhóm), (đếm=1, nhãn)).
+  combine(pairs)   gom cục bộ trong một map task: (đếm, nhãn) -> (tổng, tổng mắc).
+  partition(khoa)  khóa này thuộc Region nào, tức về reduce task nào.
+  map_task(split)  một map task: map -> combine -> partition -> Region1..RegionR.
+  shuffle(map_out, r)  reduce task r đọc Region r của mọi map task, gom theo khóa.
+  reduce_fn(vals)  một khóa -> (tổng số, số mắc, tỷ lệ mắc %).
+  reduce_task(g)   một reduce task: sort khóa rồi reduce từng khóa.
+  chay_pipeline()  toàn bộ luồng, tách riêng để app.py dùng lại (log=False).
+  chay_job()       driver, đóng vai JobTracker.
+
+Hiệu quả combine đo được: mỗi map task phát 192.288 cặp, combine còn 27 cặp. Cả
+job shuffle 108 giá trị thay vì 769.168, giảm 7.122 lần. Đây là công dụng của
+combiner: giảm dữ liệu chuyển qua shuffle.
+
+partition() tự băm bằng tổng mã ký tự chứ không gọi hash() có sẵn: hash() của chuỗi
+trong Python đổi theo từng lần chạy (PYTHONHASHSEED ngẫu nhiên) nên khóa sẽ rơi vào
+reducer khác nhau giữa các lần, không tái lập được kết quả.
+
+combine và partition không làm sai kết quả: mọi cấu hình (split, reduce) đều khớp
+cách cộng thẳng. Bộ số Job 1 đầy đủ:
+kien_truc.txt phần Dữ liệu.
+
+
+job2.py  (Job 2 - Dự đoán bằng Logistic Regression, train theo MapReduce)
+-----------------------------------------------------------------------------
+Huấn luyện Logistic Regression bằng gradient descent viết theo luồng MapReduce của
+Concept 1. Ghi trọng số ra model.json cho app.py dùng lại. Lý do chọn Logistic,
+không PySpark/sklearn: kien_truc.txt phần Job 2 và Engine viết tay.
+
+Đặc trưng (13 chiều, thứ tự theo TEN_DAC_TRUNG):
+  - 4 đặc trưng số: chuẩn hóa mean/std, tính từ train, áp cho cả train và test.
+  - 2 biến nhị phân (hypertension, heart_disease): giữ nguyên 0/1.
+  - gender, smoking_history: one-hot, bỏ một nhóm tham chiếu (gender bỏ "Female",
+    smoking bỏ "No Info"), giống cách glm trong R mã hóa biến hạng mục, tránh đa
+    cộng tuyến với hệ số chặn b.
+
+Các pha MapReduce của một vòng gradient descent:
+  vector(doc)   mã hóa một bệnh nhân thành vector đặc trưng.
+  map_fn(mau)   mỗi record -> đóng góp gradient = (sigmoid(z) - y) * x.
+  map_task(sp)  một map task: map từng record rồi combine cộng cục bộ trong split.
+  reduce_fn()   cộng các đóng góp -> gradient tổng.
+  cập nhật w, b theo hướng ngược gradient.
+
+Mở rộng Lab 2 câu 8: câu 8 cho Reduce trả dự đoán bằng LinearRegression gọi thư
+viện; ở đây tự huấn luyện logistic bằng gradient descent lặp vì nhãn nhị phân. Mỗi
+vòng lặp là một job MapReduce đầy đủ: train chia SO_SPLIT=4 split, mỗi split là một
+map task tự cộng gradient cục bộ (combine), reduce cộng 4 kết quả cục bộ thành
+gradient toàn tập. Cộng theo split rồi cộng tiếp vẫn ra đúng gradient toàn tập vì
+phép cộng có tính kết hợp, và đó chính là lý do gradient descent song song hóa
+được, tức lý do bài toán này hợp với MapReduce.
+
+combine ở đây dùng lại chính reduce_fn: cả hai đều là phép cộng, và tổng cục bộ
+(vector d chiều, sai số) cùng dạng với đóng góp thô từ map nên cộng chung một cách.
+
+Dừng khi hội tụ, không đoán cứng số vòng: mỗi KIEM=25 vòng kiểm tra loss, loss giảm
+chưa tới TOL=1e-5 thì dừng. Dừng quanh vòng 1375, loss ~0.116.
+
+Không tái cân bằng dữ liệu lệch, dùng ngưỡng 0.5. Mốc ZeroR và bộ metric đánh giá:
+kien_truc.txt phần Đánh giá. Đánh giá train/test 80/20 tất định theo SEED=42. Kết quả và
+liên hệ với Job 1: kien_truc.txt phần Job 2.
+
+Train một lần khoảng vài phút (Python thuần, không numpy); app.py chỉ đọc model.json,
+không train lại khi demo.
+
+
+job3.py  (Job 3 - Tìm kiếm, lọc bệnh nhân theo mô hình MapReduce)
+-----------------------------------------------------------------------------
+Lọc bệnh nhân theo bộ điều kiện trên từng chỉ số, viết theo luồng MapReduce. Bám
+sát Lab 2 câu 7 (Map/Reduce lọc record theo điều kiện cột, Age>=30), khác một điểm:
+reduce trả về cả danh sách record chứ không chỉ con đếm.
+
+Các pha:
+  doc_input()      InputFormat: đọc document từ MongoDB.
+  thoa(doc, dk)    một record có thỏa toàn bộ điều kiện lọc không.
+  map_fn(doc, dk)  chỉ phát ra record thỏa điều kiện, bỏ qua phần còn lại.
+  map_task(split)  chỉ có map, không combine/partition (lý do: kien_truc.txt phần Job 3).
+  shuffle()        gom output các map task theo khóa.
+  reduce_fn(vals)  -> (số bệnh nhân khớp, danh sách bệnh nhân).
+  chay_job(dk, docs)  driver. docs truyền từ ngoài vào để app.py đọc Mongo một lần
+                      rồi lọc nhiều lần, không đọc lại mỗi lần đổi bộ lọc.
+
+Vì sao không dùng collection.find() cho gọn: tiêu chí đồ án là thể hiện Concept 1,
+mà find() giấu pha map vào engine của MongoDB. Đây cũng là chức năng gần Lab 2 câu 7
+nhất nên viết tay là bám sát bài đã học. Kết quả khớp find() trên các bộ lọc,
+tốc độ tương đương vì dữ liệu đã nằm trong RAM. Ưu nhược của hai
+cách: kien_truc.txt phần Job 3.
+
+
+app.py  (Giao diện Streamlit - tầng phục vụ, 3 chức năng)
+-----------------------------------------------------------------------------
+Ba tab, mỗi tab một chức năng đề tài yêu cầu. Chạy: streamlit run app.py (cần
+MongoDB đang chạy và đã có model.json từ job2.py). Lý do chọn Streamlit:
+kien_truc.txt phần Kiến trúc.
+
+pandas ở đây chỉ trình bày: gói kết quả đã tính xong vào DataFrame để st.dataframe
+và st.bar_chart hiển thị. Phép tính vẫn ở job1.py, job2.py.
+
+Tab Thống kê
+  Gọi thẳng job1.chay_pipeline(), cache bằng st.cache_data. Mỗi chỉ số một bảng và
+  một biểu đồ cột tỷ lệ mắc.
+
+Tab Tìm kiếm - lọc
+  Gọi job3.chay_job(), mỗi widget một ràng buộc trên một chỉ số. Không cache kết
+  quả lọc: mỗi tổ hợp bộ lọc sẽ là một mục cache riêng ôm theo danh sách record
+  (bộ lọc rỗng là cả 96.146 record) nên cache phình bộ nhớ, trong khi lọc lại chỉ
+  mất khoảng 0,1 giây. Chỉ cache doc_patients() - phần đọc Mongo, dùng chung cho
+  cả Job 1 và Job 3.
+
+Tab Dự đoán
+  Mã hóa bằng chính hàm vector() của job2.py, mean/std đọc từ model.json (train và
+  dự đoán mã hóa y hệt nhau), tính p = sigmoid(w.x + b). Hiện xác suất, nhãn, và
+  bảng đóng góp từng yếu tố (w_j * x_j) sắp xếp giảm dần.
+
+App và job2.py chỉ giao tiếp qua model.json.

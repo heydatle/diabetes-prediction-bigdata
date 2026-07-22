@@ -1,0 +1,234 @@
+KIẾN TRÚC VÀ QUYẾT ĐỊNH KỸ THUẬT - HỆ THỐNG DỰ ĐOÁN NGUY CƠ TIỂU ĐƯỜNG
+
+
+--------------------------------------------------------------------------
+1. KIẾN TRÚC BA TẦNG
+--------------------------------------------------------------------------
+
+  [Người dùng] --> Streamlit (3 chức năng) --> MongoDB (nguồn dữ liệu)
+                        ^                            |
+                        |                            v
+                     kết quả  <--  Concept 1: Map/Reduce viết tay (Python thuần)
+
+Lưu trữ: MongoDB, collection patients (~96k document sau khử trùng lặp). Trong
+Concept 1 là nguồn dữ liệu InputFormat đọc lên; không gọi "DFS" vì vai trò đó là
+HDFS ở cụm thật. MongoDB do đề tài quy định.
+
+Xử lý: ba job MapReduce viết tay, mỗi job đúng dataflow Concept 1:
+  InputFormat -> map() -> partition/combine -> Region -> shuffle -> sort ->
+  reduce() -> OutputFormat
+
+Phục vụ: Streamlit ba chức năng (Thống kê, Tìm kiếm, Dự đoán).
+
+Bốn module vẽ theo Concept 1: Job 1, Job 2, Job 3, Dự đoán. Ba chức năng đều tựa
+Concept 1: Thống kê đọc kết quả Job 1, Tìm kiếm gọi Job 3 tại chỗ, Dự đoán tiêu
+thụ (w, b) của Job 2.
+
+
+--------------------------------------------------------------------------
+2. DỮ LIỆU
+--------------------------------------------------------------------------
+
+2.1 Tiền xử lý (bằng chứng ở eda.ipynb; không có ô trống)
+  - Trùng lặp: 3.854 dòng, loại, còn 96.146.
+  - age<1 (911 dòng): giữ. Giá trị rời rạc cách đều 0.08 (tháng/12) nên là tuổi hợp
+    lệ; cả 911 đều diabetes/hypertension/heart_disease = 0. Loại là chủ quan.
+  - bmi=27.32 lặp 25.495 dòng (25,5%): giữ, ghi là hạn chế. Trùng mean cột nên là
+    dữ liệu điền khuyết bằng mean, không phải đo thật. Nhóm này mắc 6,01% so với
+    9,35% còn lại, làm loãng bucket BMI 25-29.9 của Job 1. Không khôi phục được nên
+    không điền lại.
+  - HbA1c và glucose mỗi cột chỉ 18 giá trị phân biệt (age có 102): dấu hiệu dataset
+    tổng hợp. Ghi nhận, không dùng làm căn cứ loại dòng.
+  - No Info (35.816 dòng, 35,8%): giữ thành hạng mục riêng; loại đi mất quá nhiều.
+  - gender "Other" (18 dòng, prevalence 0%): giữ, one-hot riêng.
+  - Chuẩn hóa số cho logistic (mean/std từ train); one-hot biến hạng mục.
+
+2.2 Số liệu EDA (100.000 dòng thô, tái lập bằng eda.ipynb)
+Nhãn: 91,50% không / 8,50% mắc.
+  Tuổi (ADA/CDC 40/50/60)  <40=1.56 | 40-49=6.84 | 50-59=12.51 | >=60=19.68
+  HbA1c (ADA)              <5.7=0.00 | 5.7-6.4=8.00 | >=6.5=24.96
+  Glucose (ADA)            <100=0.00 | 100-125=0.00 | >=126=11.83
+  BMI (WHO)                <18.5=0.75 | 18.5-24.9=3.88 | 25-29.9=7.30 | >=30=17.99
+  Cao huyết áp             không=6.93 | có=27.90   (~4x)
+  Bệnh tim                 không=7.53 | có=32.14   (~4.3x)
+  Giới                     Nữ=7.62 | Nam=9.75
+  Hút thuốc                former=17.0 cao nhất | No Info=4.06 thấp nhất
+
+  age      min=0.08   max=80.00   mean=41.89    median=43.00   sd=22.52
+  bmi      min=10.01  max=95.69   mean=27.32    median=27.32   sd=6.64
+  HbA1c    min=3.50   max=9.00    mean=5.53     median=5.80    sd=1.07
+  glucose  min=80.00  max=300.00  mean=138.06   median=140.00  sd=40.71
+
+Bảng Job 1 (96.146 dòng đã khử trùng lặp, tái lập bằng job1.py):
+  Tuổi        <40=1.62 | 40-49=7.10 | 50-59=12.88 | >=60=20.51
+  HbA1c       <5.7=0.00 | 5.7-6.4=8.30 | >=6.5=25.76
+  Glucose     <100=0.00 | 100-125=0.00 | >=126=12.27
+  BMI         <18.5=0.75 | 18.5-24.9=3.89 | 25-29.9=7.93 | >=30=17.99
+  Cao huyết áp không=7.21 | có=27.96
+  Bệnh tim     không=7.82 | có=32.30
+  Giới         Nữ=7.92 | Nam=10.10
+  Hút thuốc    former=17.10 cao nhất | No Info=4.39 thấp nhất
+
+Job 1 cao hơn đều (8,50% -> 8,82%) vì trong 3.854 dòng bị khử, 3.836 (99,5%) không
+mắc. Hai bảng chạy trên hai tập khác nhau (100k thô và 96k đã khử trùng).
+
+2.3 Cấu trúc nhãn
+Toàn bộ 8.500 ca mắc đều thỏa đồng thời HbA1c>=5.7 và glucose>=126 (nhỏ nhất đúng
+5.7 và 126). Ngưỡng ADA trùng khít cấu trúc sinh nhãn: điều kiện cần. Nhưng chưa
+đủ: nhóm qua cả hai ngưỡng chiếm 45,61% dữ liệu mà chỉ 18,64% mắc, nên nhãn phải
+tổ hợp nhiều yếu tố chứ không do một ngưỡng. Quy tắc "HbA1c>=6.5 hoặc glucose>=126"
+chỉ đạt Acc 31.78 / Prec 11.08 / Rec 100 / F1 19.95 vì glucose>=126 phủ 71,86%.
+
+2.4 Ngưỡng phân nhóm và nguồn
+  HbA1c 5.7/6.5 và glucose 100/126: ADA Standards of Care. Glucose giả định đo lúc
+    đói (chỉ cách này khớp 100/126; OGTT 140/200, ngẫu nhiên 200), dataset không ghi
+    cách đo.
+  BMI 18.5/25/30: WHO. Có ngưỡng riêng cho châu Á (18.5/23/27.5); giữ chuẩn phổ quát
+    vì dataset không ghi gốc dân số.
+  Tuổi 40/50/60: ADA/CDC Diabetes Risk Test.
+
+
+--------------------------------------------------------------------------
+3. JOB 1 - THỐNG KÊ
+--------------------------------------------------------------------------
+Bảng tỷ lệ mắc theo nhóm chỉ số (số ở 2.2). Không training.
+Pha: map mỗi record -> (chỉ số, nhóm) -> (1, nhãn) | combine gom cục bộ | partition
+27 khóa về SO_REDUCE=2 Region | shuffle, sort, reduce tính tổng và tỷ lệ.
+
+partition/combine: CÓ cả hai. 27 khóa nên chia Region cho nhiều reduce task mới có
+nghĩa; combine gom được nhờ tính kết hợp, giảm shuffle 769.168 -> 108 (7.122 lần).
+Kết quả không đổi theo số split/reduce: mọi cấu hình đều khớp cách cộng thẳng.
+
+Nền Ch3: Combiner và Partitioner là "user components (Optional)", "reducer can be
+combiner", partitioner mặc định key.hashCode()%n và cho tự override. partition() tự
+băm bằng tổng mã ký tự thay hash() vì hash() chuỗi đổi mỗi lần chạy, mất tái lập.
+
+
+--------------------------------------------------------------------------
+4. JOB 2 - LOGISTIC REGRESSION
+--------------------------------------------------------------------------
+z = Σ wᵢxᵢ + b; p = sigmoid(z) ∈ [0,1]; mắc nếu p >= 0.5.
+
+Chọn logistic vì nhãn nhị phân, sigmoid đưa kết quả về [0,1] để đọc như xác suất.
+Môn không dạy logistic; nó là bản phân loại của hồi quy tuyến tính có dạy (lm ở Ch6,
+LinearRegression ở Lab 2 câu 8 và MLlib Ch5), chỉ thay đường thẳng bằng sigmoid.
+Loại: Linear (ra ngoài [0,1]); cộng trung bình prevalence (không cơ sở xác suất);
+Naive Bayes (thêm giả định độc lập); Random Forest và KNN (Ch6 và Lab 4 có dạy,
+nhưng hộp đen, không đọc được hệ số để soi Job 1, và không huấn luyện được dạng
+MapReduce như gradient descent; bản R phải gọi thư viện); Deep Learning (chỉ nhắc
+tên ở Ch1, over-engineering cho nhãn nhị phân).
+
+Đặc trưng 13 chiều: 4 số chuẩn hóa (mean/std từ train); 2 nhị phân giữ 0/1; gender
+và smoking one-hot bỏ nhóm tham chiếu (Female, No Info) để tránh đa cộng tuyến với b.
+
+MapReduce mỗi vòng: map phát gradient (sigmoid(z)-y)*x | combine cộng cục bộ theo
+split | reduce cộng toàn tập, cập nhật w, b. SO_SPLIT=4, lặp tới hội tụ (dừng quanh
+vòng 1375), ghi model.json. Gradient tổng là phép cộng nên chia dữ liệu ra tính
+riêng rồi cộng lại vẫn bằng nhau (tính kết hợp), đó là cơ sở để song song hóa.
+mau_train đọc và tổ chức một lần trước vòng lặp và giữ trong RAM; mỗi vòng là một
+job MapReduce đầy đủ trên cùng tập đó, nên cả quá trình là lặp lại một job chứ không
+phải phân bố lại dữ liệu 1375 lần. Mở rộng từ Lab 2 câu 8 (câu 8 để Reduce trả dự
+đoán bằng LinearRegression gọi thư viện; đây tự huấn luyện logistic bằng gradient
+descent).
+
+partition/combine: combine CÓ, partition KHÔNG. Cả job chỉ một khóa (gradient tổng)
+nên chia Region vô nghĩa, và không có pha shuffle riêng vì gom-theo-khóa suy biến
+thành một reduce (khác Job 1 có 27 khóa). Combine vẫn có ích: cộng gradient cục bộ
+theo split. Cặp Job 1 (có partition) và Job 2 (không) là hai cách trả lời
+"partition/combine?" của slide.
+
+Ch1 nêu MapReduce yếu với thuật toán lặp vì mapper đọc lại đĩa mỗi vòng; ở đây
+mau_train nằm trong RAM nên không vướng điểm đó. Tối ưu bài toán lặp là thế mạnh của
+Spark, để ở hướng mở rộng.
+
+Kết quả (train 76.917 / test 19.229, SEED=42, loss ~0.116):
+  ZeroR     accuracy 91.24%, recall nhóm mắc = 0
+  Logistic  Acc 95.85 / Prec 86.50 / Rec 62.37 / F1 72.48
+Hệ số |w|: HbA1c +2.49 > glucose +1.36 > tuổi +1.04 > cao huyết áp +0.73 > bệnh tim
++0.66 > BMI +0.59 > hút thuốc (current +0.33...) > giới (Male +0.24); b = -5.50.
+Bốn đặc trưng số đã chuẩn hóa nên so |w| được, thứ tự HbA1c>glucose>tuổi>BMI khớp
+gradient prevalence Job 1. Cao huyết áp và bệnh tim là nhị phân chưa chuẩn hóa nên
+chỉ so theo dấu (dương, cùng chiều prevalence gấp ~4 lần), không xếp chung thang.
+
+
+--------------------------------------------------------------------------
+5. JOB 3 - TÌM KIẾM, LỌC
+--------------------------------------------------------------------------
+Lọc bệnh nhân theo điều kiện từng chỉ số. Bám Lab 2 câu 7 (lọc record theo cột,
+Age>=30), khác ở reduce trả cả danh sách chứ không chỉ đếm.
+Pha: map giữ record thỏa | shuffle gom theo khóa | reduce -> (số khớp, danh sách).
+
+partition/combine: KHÔNG cả hai. Một khóa nên partition vô nghĩa; reduce cần chính
+danh sách record nên gom cục bộ không bớt được gì qua shuffle.
+
+Viết tay thay vì find() vì find() giấu pha map vào engine Mongo, mà mục tiêu là thể
+hiện Concept 1; đây cũng là chức năng gần Lab 2 câu 7 nhất. Kết quả khớp find() trên
+mọi bộ lọc, tốc độ tương đương vì dữ liệu đã trong RAM. So với find(): viết tay lộ
+rõ từng pha nhưng quét toàn tập, find() dùng index nên co giãn tốt hơn khi dữ liệu
+lớn (hướng mở rộng).
+
+
+--------------------------------------------------------------------------
+6. DỰ ĐOÁN (tầng phục vụ)
+--------------------------------------------------------------------------
+Nhập chỉ số một người, chuẩn hóa, p = sigmoid(Σ wᵢxᵢ + b), trả nhãn kèm xác suất và
+bảng đóng góp wᵢxᵢ. Không dựng theo khung 6 bước: là bước tiêu thụ (w, b) của Job 2,
+xử lý một input nên không có shuffle/reduce thật.
+
+
+--------------------------------------------------------------------------
+7. ĐÁNH GIÁ
+--------------------------------------------------------------------------
+Train/test; confusion matrix + Acc/Prec/Rec/F1; mốc ZeroR (đoán đa số). Dữ liệu lệch
+91.5/8.5 nên accuracy đơn lẻ đánh lừa, cần precision/recall trên nhóm mắc.
+Nguồn: Ch6 (R) và Lab 4 (Tuần 10) dạy train/test + confusion matrix + accuracy.
+Precision/Recall/F1 là phần thêm vì dữ liệu lệch (bài giảng chỉ tới accuracy).
+
+
+--------------------------------------------------------------------------
+8. ENGINE VIẾT TAY
+--------------------------------------------------------------------------
+Core không dùng PySpark/sklearn/pandas. Viết tay để lộ rõ từng pha
+split-map-shuffle-reduce của Concept 1; spark.sql, pandas.groupby, numpy vectorize
+đều giấu các pha thành hộp đen. pandas chỉ ở app.py để trình bày; sklearn không dùng.
+
+MapReduce (Lab 2, Tuần 05-06): tự viết Map()/Reduce() Python đọc CSV đếm theo cột.
+PySpark (Lab 3, Tuần 07-08): SparkSession + SparkSQL qua createTempView, không RDD.
+RDD có ở Ch5 lý thuyết nhưng Lab 3 dùng DataFrame/SparkSQL; kể cả RDD, shuffle thật
+vẫn nằm trong runtime Spark, còn shuffle() ở job1.py là hàm tự viết. PySpark để
+hướng mở rộng, viết lại cùng logic bằng SparkSQL.
+
+
+--------------------------------------------------------------------------
+9. NGUỒN
+--------------------------------------------------------------------------
+Concept 1 / MapReduce  Ch4 (Concept 1, slide "Exer for concept 1"), Ch2 (JobTracker/
+                       TaskTracker), Ch3 (word count, Combiner/Partitioner), Lab 2
+                       câu 7, Dean & Ghemawat 2004.
+Ngưỡng lâm sàng        ADA (HbA1c, glucose), WHO (BMI), ADA/CDC (tuổi) - mục 2.4.
+Đánh giá               Ch6 (R), Lab 4 (Tuần 10).
+Logistic               bản phân loại của lm (Ch6); mở rộng Lab 2 câu 8.
+Dataset                Kaggle, Mohammed Mustafa.
+
+Không dùng: sklearn (hộp đen); ma trận tương quan (thiên về feature selection ML,
+bảng prevalence Job 1 đã cho biết yếu tố nào ảnh hưởng); Sequence/Class diagram (chỉ
+đề nhắn tin, giao hàng cần). Các model đã cân và loại (gồm cả Random Forest, KNN):
+xem phần Job 2.
+
+
+--------------------------------------------------------------------------
+10. PHÂN GIAI ĐOẠN (Ch3.2)
+--------------------------------------------------------------------------
+Giai đoạn là vòng đời hệ thống, khác 4 pha nội bộ split-map-shuffle-reduce.
+  GĐ1  Tổ chức, phân bố dữ liệu    CSV -> khử trùng lặp -> MongoDB
+  GĐ2  MapReduce thống kê (Job 1)  -> bảng nguy cơ
+  GĐ3  MapReduce huấn luyện (Job 2) tách train/test -> chuẩn hóa -> GD -> (w, b)
+  GĐ4  Phục vụ                     Streamlit 3 chức năng (Job 3 chạy tại chỗ)
+Hai job tách riêng vì reduce khác nghĩa (Job 1 đếm và tính tỷ lệ, Job 2 cộng
+gradient).
+
+Chuẩn hóa ở GĐ3 chứ không GĐ1: mean/std chỉ tính từ train để chống rò rỉ test;
+MongoDB giữ giá trị thô để Tìm kiếm và Thống kê đọc được. Trong code: tach_train_test
+chạy trước, thong_ke_chuan_hoa chỉ nhận train. Chuẩn hóa (kéo số về cùng thang, 4
+biến số) khác one-hot (chữ thành số). Biến 0/1 không chuẩn hóa (thang nhỏ, để đọc hệ
+số) và không one-hot (đã là số), nên không so |w| của chúng với biến số.
